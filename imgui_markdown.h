@@ -19,6 +19,19 @@
 //    misrepresented as being the original software.
 // 3. This notice may not be removed or altered from any source distribution.
 
+
+// ====================
+// FORKED 5.19.26 BY JORDON RENN FOR SAUCE BOX GAME'S SAUCE ENGINE IMPLEMENTATION
+// VERSION 0.1.1 (Original repo did not have version numbers)
+// FEATURES ADDED:
+// - Code block support with optional language identifier for syntax highlighting (see example MarkdownSyntaxHighlightCallback in defaultMarkdownFormatCallback definition)
+// PLANNED FEATURES:
+// - Tooltip support for links and images (see defaultMarkdownTooltipCallback definition)???
+// - Linking to other md files with support for relative paths???
+// - Support for more markdown features such as block quotes and tables, etc.???
+// ====================
+
+
 /*
 API BREAKING CHANGES
 ====================
@@ -226,6 +239,7 @@ ___
 */
 
 #include <stdint.h>
+#include <cstring>
 
 typedef int ImGuiMarkdownFormatFlags;
 
@@ -284,6 +298,16 @@ namespace ImGui
          UNORDERED_LIST,
          LINK,
          EMPHASIS,
+         CODE_BLOCK,
+    };
+
+    enum class CodeBlockLanguage
+    {
+        NONE,
+        CPP,
+        CSHARP,
+        LUA,
+        TOML,
     };
 
     struct MarkdownFormatInfo
@@ -294,10 +318,15 @@ namespace ImGui
         const MarkdownConfig*   config  = NULL;
         const char*             text    = NULL;
         int32_t                 textLength = 0;
+        CodeBlockLanguage       language = CodeBlockLanguage::NONE;       // Set for code blocks
     };
 
     typedef void                MarkdownLinkCallback( MarkdownLinkCallbackData data );
     typedef void                MarkdownTooltipCallback( MarkdownTooltipCallbackData data );
+
+    typedef MarkdownImageData   MarkdownImageCallback( MarkdownLinkCallbackData data );
+    typedef void                MarkdownFormalCallback( const MarkdownFormatInfo& markdownFormatInfo_, bool start_ );
+    typedef void                MarkdownSyntaxHighlightCallback( const MarkdownFormatInfo& markdownFormatInfo_, const char* codeStart_, int codeLength_, bool start_ );
 
     inline void defaultMarkdownTooltipCallback( MarkdownTooltipCallbackData data_ )
     {
@@ -329,6 +358,7 @@ namespace ImGui
     // - linkCallback is called when a link is clicked on
     // - linkIcon is a string which encode a "Link" icon, if available in the current font (e.g. linkIcon = ICON_FA_LINK with FontAwesome + IconFontCppHeaders https://github.com/juliettef/IconFontCppHeaders)
     // - headingFormats controls the format of heading H1 to H3, those above H3 use H3 format
+    // - syntaxHighlightCallback is called for each line of a code block for custom syntax highlighting
     struct MarkdownConfig
     {
         static const int         NUMHEADINGS = 3;
@@ -336,6 +366,7 @@ namespace ImGui
         MarkdownLinkCallback*    linkCallback = NULL;
         MarkdownTooltipCallback* tooltipCallback = NULL;
         MarkdownImageCallback*   imageCallback = NULL;
+        MarkdownSyntaxHighlightCallback*   syntaxHighlightCallback = NULL;    // Called for code block syntax highlighting
         const char*              linkIcon = "";                      // icon displayd in link tooltip
         MarkdownHeadingFormat    headingFormats[ NUMHEADINGS ] = { { NULL, true }, { NULL, true }, { NULL, true } };
         void*                    userData = NULL;
@@ -445,6 +476,20 @@ namespace ImGui
         char sym;
 	};
 
+    struct CodeBlock {
+        enum CodeBlockState {
+            NO_CODE_BLOCK,
+            HAS_OPENING_BACKTICKS,
+            IN_CODE_BLOCK,
+            HAS_CLOSING_BACKTICKS,
+        };
+        CodeBlockState state = NO_CODE_BLOCK;
+        CodeBlockLanguage language = CodeBlockLanguage::NONE;
+        TextBlock code;
+        int backtickCount = 0;
+        int lineStart = 0;      // Line where code block starts
+    };
+
     inline void UnderLine( ImColor col_ )
     {
         ImVec2 min = ImGui::GetItemRectMin();
@@ -452,6 +497,35 @@ namespace ImGui
         min.y = max.y;
         ImGui::GetWindowDrawList()->AddLine( min, max, col_, 1.0f );
     }
+
+    // Helper function to parse code block language identifier
+    inline CodeBlockLanguage ParseCodeBlockLanguage( const char* languageStr_, int length_ )
+    {
+        if( length_ == 0 ) return CodeBlockLanguage::NONE;
+
+        // Convert to lowercase for comparison
+        static char buffer[32];
+        int copyLen = length_ > 31 ? 31 : length_;
+        for( int i = 0; i < copyLen; ++i )
+        {
+            buffer[i] = languageStr_[i] >= 'A' && languageStr_[i] <= 'Z' ? 
+                        languageStr_[i] + 32 : languageStr_[i];
+        }
+        buffer[copyLen] = 0;
+
+        if( strncmp( buffer, "cpp", 3 ) == 0 || strncmp( buffer, "c++", 3 ) == 0 )
+            return CodeBlockLanguage::CPP;
+        else if( strncmp( buffer, "csharp", 6 ) == 0 || strncmp( buffer, "c#", 2 ) == 0 )
+            return CodeBlockLanguage::CSHARP;
+        else if( strncmp( buffer, "lua", 3 ) == 0 )
+            return CodeBlockLanguage::LUA;
+        else if( strncmp( buffer, "toml", 4 ) == 0 )
+            return CodeBlockLanguage::TOML;
+        
+        return CodeBlockLanguage::NONE;
+    }
+
+    inline void UnderLine( ImColor col_ )
 
     inline void RenderLine( const char* markdown_, Line& line_, TextRegion& textRegion_, const MarkdownConfig& mdConfig_ )
     {
@@ -529,6 +603,7 @@ namespace ImGui
         Line        prevLine;
         Link        link;
         Emphasis    em;
+        CodeBlock   codeBlock;
         TextRegion  textRegion;
         int concurrentEmptyNewlines = 0;
         bool appliedExtraNewline = false;
@@ -621,6 +696,148 @@ namespace ImGui
                     ImGui::NewLine();
                     appliedExtraNewline = true;
                 }
+            }
+
+            // Test to see if we have a code block
+            if( codeBlock.state == CodeBlock::NO_CODE_BLOCK && c == '`' && line.isLeadingSpace && line.leadSpaceCount == 0 )
+            {
+                // Check for triple backticks at start of line
+                int backtickCount = 0;
+                int j = i;
+                while( j < (int)markdownLength_ && markdown_[j] == '`' )
+                {
+                    backtickCount++;
+                    j++;
+                }
+                
+                if( backtickCount >= 3 )
+                {
+                    // Render any previous content before code block
+                    line.lineEnd = i;
+                    if( line.lineEnd > line.lineStart )
+                    {
+                        RenderLine( markdown_, line, textRegion, mdConfig_ );
+                    }
+                    
+                    // Start code block
+                    codeBlock.state = CodeBlock::HAS_OPENING_BACKTICKS;
+                    codeBlock.backtickCount = backtickCount;
+                    codeBlock.lineStart = i;
+                    codeBlock.code.start = j;
+                    
+                    // Extract language identifier
+                    int langStart = j;
+                    while( j < (int)markdownLength_ && markdown_[j] != '\n' && markdown_[j] != '\r' )
+                    {
+                        j++;
+                    }
+                    int langLength = j - langStart;
+                    
+                    // Parse the language identifier
+                    if( langLength > 0 )
+                    {
+                        codeBlock.language = ParseCodeBlockLanguage( markdown_ + langStart, langLength );
+                    }
+                    
+                    // Skip to next line
+                    if( j < (int)markdownLength_ && markdown_[j] == '\r' && j + 1 < (int)markdownLength_ && markdown_[j + 1] == '\n' )
+                    {
+                        i = j + 1;
+                    }
+                    else if( j < (int)markdownLength_ && (markdown_[j] == '\n' || markdown_[j] == '\r') )
+                    {
+                        i = j;
+                    }
+                    else
+                    {
+                        i = j - 1;
+                    }
+                    
+                    codeBlock.code.start = i + 1;
+                    codeBlock.state = CodeBlock::IN_CODE_BLOCK;
+                    
+                    // Reset line for code block content
+                    line = Line();
+                    line.isLeadingSpace = true;
+                    line.lineStart = i + 1;
+                    line.lastRenderPosition = i;
+                    
+                    continue;
+                }
+            }
+            else if( codeBlock.state == CodeBlock::IN_CODE_BLOCK )
+            {
+                // Check for closing triple backticks at start of line
+                if( c == '`' && line.isLeadingSpace && line.leadSpaceCount == 0 )
+                {
+                    int backtickCount = 0;
+                    int j = i;
+                    while( j < (int)markdownLength_ && markdown_[j] == '`' )
+                    {
+                        backtickCount++;
+                        j++;
+                    }
+                    
+                    if( backtickCount >= codeBlock.backtickCount )
+                    {
+                        // End code block
+                        codeBlock.code.stop = i;
+                        
+                        // Render code block
+                        MarkdownFormatInfo formatInfo;
+                        formatInfo.config = &mdConfig_;
+                        formatInfo.type = MarkdownFormatType::CODE_BLOCK;
+                        formatInfo.language = codeBlock.language;
+                        formatInfo.text = markdown_ + codeBlock.code.start;
+                        formatInfo.textLength = codeBlock.code.stop - codeBlock.code.start;
+                        
+                        mdConfig_.formatCallback( formatInfo, true );
+                        
+                        // Render the code block content with syntax highlighting if callback provided
+                        if( mdConfig_.syntaxHighlightCallback )
+                        {
+                            mdConfig_.syntaxHighlightCallback( formatInfo, markdown_ + codeBlock.code.start, codeBlock.code.stop - codeBlock.code.start, true );
+                        }
+                        else
+                        {
+                            // Default: just render as monospace text
+                            ImGui::PushFont( mdConfig_.headingFormats[0].font ? mdConfig_.headingFormats[0].font : NULL );
+                            ImGui::TextUnformatted( markdown_ + codeBlock.code.start, markdown_ + codeBlock.code.stop );
+                            if( mdConfig_.headingFormats[0].font )
+                                ImGui::PopFont();
+                        }
+                        
+                        mdConfig_.formatCallback( formatInfo, false );
+                        
+                        // Skip to end of closing backticks
+                        i = j - 1;
+                        
+                        // Reset code block state
+                        codeBlock = CodeBlock();
+                        line = Line();
+                        line.isLeadingSpace = true;
+                        line.lineStart = i + 1;
+                        line.lastRenderPosition = i;
+                        
+                        continue;
+                    }
+                }
+                
+                // We're in code block, just track content (don't process links/emphasis)
+                if( c == '\n' )
+                {
+                    line = Line();
+                    line.isLeadingSpace = true;
+                    line.lineStart = i + 1;
+                    line.lastRenderPosition = i;
+                    concurrentEmptyNewlines = 0;
+                    appliedExtraNewline = false;
+                }
+                else
+                {
+                    line.isLeadingSpace = false;
+                }
+                continue;
             }
 
             // Test to see if we have a link
@@ -1172,6 +1389,176 @@ namespace ImGui
                 }
             }
             break;
+        case MarkdownFormatType::CODE_BLOCK:
+            if( start_ )
+            {
+                ImGui::PushStyleColor( ImGuiCol_FrameBg, ImGui::GetStyle().Colors[ ImGuiCol_FrameBg ] );
+                ImGui::BeginChild( "##CodeBlock", ImVec2( 0, 0 ), true, ImGuiWindowFlags_NoMove );
+            }
+            else
+            {
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+            }
+            break;
         }
     }
 }
+
+// Default syntax highlighting callback for code blocks
+inline void defaultMarkdownSyntaxHighlightCallback( const ImGui::MarkdownFormatInfo& markdownFormatInfo_, const char* codeStart_, int codeLength_, bool start_ )
+{
+    // This is a basic implementation. Users can override with their own syntax highlighter
+    if( start_ )
+    {
+        ImGui::PushTextWrapPos( -1.0f );
+        ImGui::TextUnformatted( codeStart_, codeStart_ + codeLength_ );
+        ImGui::PopTextWrapPos();
+    }
+}
+
+// Helper function for basic syntax highlighting (can be extended with more keywords)
+inline bool IsCodeKeyword( const char* text_, int length_, const ImGui::CodeBlockLanguage& language_ )
+{
+    // C++ and C# keywords
+    if( language_ == ImGui::CodeBlockLanguage::CPP || language_ == ImGui::CodeBlockLanguage::CSHARP )
+    {
+        static const char* keywords[] = {
+            "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor", "bool", "break",
+            "case", "catch", "char", "char8_t", "char16_t", "char32_t", "class", "compl", "concept",
+            "const", "consteval", "constexpr", "constinit", "const_cast", "continue", "co_await",
+            "co_return", "co_yield", "decltype", "default", "delete", "do", "double", "dynamic_cast",
+            "else", "enum", "explicit", "export", "extern", "false", "float", "for", "friend", "goto",
+            "if", "inline", "int", "long", "mutable", "namespace", "new", "noexcept", "not", "not_eq",
+            "nullptr", "operator", "or", "or_eq", "private", "protected", "public", "register",
+            "reinterpret_cast", "requires", "return", "short", "signed", "sizeof", "static",
+            "static_assert", "static_cast", "struct", "switch", "template", "this", "thread_local",
+            "throw", "true", "try", "typedef", "typeid", "typename", "union", "unsigned", "using",
+            "virtual", "void", "volatile", "wchar_t", "while", "xor", "xor_eq"
+        };
+        
+        for( int i = 0; i < (int)(sizeof(keywords) / sizeof(keywords[0])); ++i )
+        {
+            int keywordLen = (int)strlen( keywords[i] );
+            if( keywordLen == length_ && strncmp( text_, keywords[i], length_ ) == 0 )
+            {
+                return true;
+            }
+        }
+    }
+    // Lua keywords
+    else if( language_ == ImGui::CodeBlockLanguage::LUA )
+    {
+        static const char* luaKeywords[] = {
+            "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto",
+            "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"
+        };
+        
+        for( int i = 0; i < (int)(sizeof(luaKeywords) / sizeof(luaKeywords[0])); ++i )
+        {
+            int keywordLen = (int)strlen( luaKeywords[i] );
+            if( keywordLen == length_ && strncmp( text_, luaKeywords[i], length_ ) == 0 )
+            {
+                return true;
+            }
+        }
+    }
+    // TOML keywords
+    else if( language_ == ImGui::CodeBlockLanguage::TOML )
+    {
+        static const char* tomlKeywords[] = {
+            "true", "false"
+        };
+        
+        for( int i = 0; i < (int)(sizeof(tomlKeywords) / sizeof(tomlKeywords[0])); ++i )
+        {
+            int keywordLen = (int)strlen( tomlKeywords[i] );
+            if( keywordLen == length_ && strncmp( text_, tomlKeywords[i], length_ ) == 0 )
+            {
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+// Example syntax highlighting callback - users can create their own for custom colors
+inline void ExampleMarkdownSyntaxHighlightCallback( const ImGui::MarkdownFormatInfo& markdownFormatInfo_, const char* codeStart_, int codeLength_, bool start_ )
+{
+    if( !start_ )
+        return;
+
+    ImGui::PushTextWrapPos( -1.0f );
+    
+    // Simple syntax highlighting - color keywords differently
+    const char* currentPos = codeStart_;
+    const char* endPos = codeStart_ + codeLength_;
+    
+    while( currentPos < endPos )
+    {
+        // Skip whitespace
+        while( currentPos < endPos && (*currentPos == ' ' || *currentPos == '\t' || *currentPos == '\n' || *currentPos == '\r') )
+        {
+            if( *currentPos == '\n' || *currentPos == '\r' )
+            {
+                ImGui::TextUnformatted( currentPos, currentPos + 1 );
+            }
+            currentPos++;
+        }
+        
+        if( currentPos >= endPos )
+            break;
+        
+        // Extract word
+        const char* wordStart = currentPos;
+        while( currentPos < endPos && 
+               ((*currentPos >= 'a' && *currentPos <= 'z') ||
+                (*currentPos >= 'A' && *currentPos <= 'Z') ||
+                (*currentPos >= '0' && *currentPos <= '9') ||
+                *currentPos == '_') )
+        {
+            currentPos++;
+        }
+        
+        int wordLength = (int)(currentPos - wordStart);
+        
+        if( wordLength > 0 )
+        {
+            if( ImGui::IsCodeKeyword( wordStart, wordLength, markdownFormatInfo_.language ) )
+            {
+                ImGui::PushStyleColor( ImGuiCol_Text, ImVec4( 0.0f, 0.6f, 1.0f, 1.0f ) );  // Blue for keywords
+                ImGui::TextUnformatted( wordStart, currentPos );
+                ImGui::SameLine( 0.0f, 0.0f );
+                ImGui::PopStyleColor();
+            }
+            else
+            {
+                ImGui::TextUnformatted( wordStart, currentPos );
+                ImGui::SameLine( 0.0f, 0.0f );
+            }
+        }
+        
+        // Print any remaining characters until next word
+        while( currentPos < endPos && 
+               !((*currentPos >= 'a' && *currentPos <= 'z') ||
+                 (*currentPos >= 'A' && *currentPos <= 'Z') ||
+                 (*currentPos >= '0' && *currentPos <= '9') ||
+                 *currentPos == '_') &&
+               *currentPos != ' ' && *currentPos != '\t' && *currentPos != '\n' && *currentPos != '\r' )
+        {
+            currentPos++;
+        }
+        
+        if( currentPos > wordStart + wordLength )
+        {
+            ImGui::TextUnformatted( wordStart + wordLength, currentPos );
+            ImGui::SameLine( 0.0f, 0.0f );
+        }
+    }
+    
+    ImGui::PopTextWrapPos();
+}
+
+}  // namespace ImGui
+

@@ -15,6 +15,7 @@ imgui_markdown currently supports the following markdown functionality:
   * Unordered list and sub-list
   * Link
   * Image
+  * Code blocks with syntax highlighting
   * Horizontal rule
 
 ![imgui_markdown demo live editing](https://github.com/enkisoftware/Media/blob/main/imgui_markdown_demo_live_editing.gif?raw=true)
@@ -67,6 +68,21 @@ Normal text
 ```
 ![image alt text](image identifier e.g. filename)
 ```
+### Code Blocks
+Code blocks are defined using triple backticks with an optional language identifier. Syntax highlighting is available for C++, C#, Lua, and TOML.
+```
+```cpp
+int main() {
+    return 0;
+}
+```
+
+```lua
+function hello()
+    print("Hello, World!")
+end
+```
+```
 ### Horizontal Rule
 ```
 ***
@@ -80,6 +96,7 @@ Non exhaustive
   * Header with link, image or emphasis included - header breaks link, image, emphasis
   * Emphasis with link or image - link, image break emphasis
   * Multiline emphasis - new line breaks emphasis
+  * Code blocks with other markdown features - content inside code blocks is rendered as-is
 
 ## Example Use On Windows With Links Opening In Browser
 
