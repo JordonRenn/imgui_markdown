@@ -82,12 +82,13 @@ function hello()
     print("Hello, World!")
 end
 ```
-```
+
 ### Horizontal Rule
 ```
 ***
 ___
 ```
+
 
 ![Example use of imgui_markdown with icon fonts](https://github.com/enkisoftware/Media/blob/main/imgui_markdown_icon_font.jpg?raw=true)
 
